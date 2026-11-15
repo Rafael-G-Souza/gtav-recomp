@@ -7,38 +7,56 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           submodules: recursive
 
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y ninja-build cmake pkg-config python3 clang lld llvm
+          sudo apt-get install -y ninja-build cmake pkg-config python3 clang lld llvm libsdl2-dev
 
-      - name: Apply patch and limit threads
+      - name: Patch and Fix Scripts
         run: |
+          # Aplica o patch das threads
           if [ -f warmup-limit.patch ]; then
             git apply --ignore-whitespace --reject warmup-limit.patch || true
           fi
-          # Reduz as threads de compilação para 1 para evitar estoiro de RAM (Scudo OOM)
+          
+          # Limita as threads no código
           find . -type f \( -name "*.cpp" -o -name "*.h" \) -exec sed -i 's/kCompilerThreads = 3/kCompilerThreads = 1/g' {} + || true
 
-      - name: Build Android binaries directly via CMake
+          # REMOVE a dependência do ficheiro fantasma do autor nos scripts
+          sed -i 's|source ~/android-tools/env.sh|# source ~/android-tools/env.sh|g' tools/android/build_sdk.sh || true
+          sed -i 's|source ~/android-tools/env.sh|# source ~/android-tools/env.sh|g' tools/android/make_shell.sh || true
+
+      - name: Build Android SDK and Game DLL
         run: |
           export ANDROID_NDK_HOME="${ANDROID_NDK_LATEST_HOME:-$ANDROID_NDK_HOME}"
-          echo "NDK em: $ANDROID_NDK_HOME"
+          export ANDROID_NDK_ROOT="$ANDROID_NDK_HOME"
+          export NDK_ROOT="$ANDROID_NDK_HOME"
+          
+          chmod +x tools/android/*.sh
+          
+          # 1. Compilar SDK
+          if [ -f tools/android/build_sdk.sh ]; then
+            ./tools/android/build_sdk.sh
+          fi
+          
+          # 2. Compilar a DLL do jogo 
+          cmake -B build/android-dll -G Ninja \
+            -DGTAV_GAME_DLL=ON \
+            -DCMAKE_BUILD_TYPE=Release
+          cmake --build build/android-dll --parallel 4
 
-          # Configura o projeto diretamente para Android arm64 via CMake
-          cmake -S . -B build-android -G Ninja \
-            -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake" \
-            -DANDROID_ABI=arm64-v8a \
-            -DANDROID_PLATFORM=android-30 \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DGTAV_GAME_DLL=ON
-
-          # Compila as bibliotecas necessárias
-          cmake --build build-android --parallel 4
+      - name: Build APK via make_shell.sh
+        run: |
+          export ANDROID_NDK_HOME="${ANDROID_NDK_LATEST_HOME:-$ANDROID_NDK_HOME}"
+          export ANDROID_NDK_ROOT="$ANDROID_NDK_HOME"
+          export NDK_ROOT="$ANDROID_NDK_HOME"
+          
+          # 3. Gerar a biblioteca final e APK
+          ./tools/android/make_shell.sh build-android
 
       - name: Upload compiled files
         uses: actions/upload-artifact@v4
