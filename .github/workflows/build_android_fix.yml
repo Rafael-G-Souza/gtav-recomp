@@ -1,22 +1,49 @@
-- name: Build Android SDK and Game DLL
+name: Build Android Definitive Fix
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build cmake pkg-config python3 clang lld llvm
+
+      - name: Apply patch and limit threads
+        run: |
+          if [ -f warmup-limit.patch ]; then
+            git apply --ignore-whitespace --reject warmup-limit.patch || true
+          fi
+          # Reduz as threads de compilação para 1 para evitar estoiro de RAM (Scudo OOM)
+          find . -type f \( -name "*.cpp" -o -name "*.h" \) -exec sed -i 's/kCompilerThreads = 3/kCompilerThreads = 1/g' {} + || true
+
+      - name: Build Android binaries directly via CMake
         run: |
           export ANDROID_NDK_HOME="${ANDROID_NDK_LATEST_HOME:-$ANDROID_NDK_HOME}"
-          export ANDROID_NDK_ROOT="$ANDROID_NDK_HOME"
-          export NDK_ROOT="$ANDROID_NDK_HOME"
-          
-          chmod +x tools/android/*.sh
-          
-          # Neutraliza a linha que procura o env.sh inexistente no runner
-          sed -i 's|source ~/android-tools/env.sh|# source ~/android-tools/env.sh|g' tools/android/build_sdk.sh || true
-          sed -i 's|source /home/runner/android-tools/env.sh|# source /home/runner/android-tools/env.sh|g' tools/android/build_sdk.sh || true
+          echo "NDK em: $ANDROID_NDK_HOME"
 
-          # 1. Compila o SDK do Android necessário para o empacotamento
-          if [ -f tools/android/build_sdk.sh ]; then
-            ./tools/android/build_sdk.sh
-          fi
-          
-          # 2. Compila a DLL do jogo para o Android com GTAV_GAME_DLL=ON
-          cmake -B build/android-dll -G Ninja \
-            -DGTAV_GAME_DLL=ON \
-            -DCMAKE_BUILD_TYPE=Release
-          cmake --build build/android-dll --parallel 4
+          # Configura o projeto diretamente para Android arm64 via CMake
+          cmake -B build-android -G Ninja \
+            -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake" \
+            -DANDROID_ABI=arm64-v8a \
+            -DANDROID_PLATFORM=android-30 \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DGTAV_GAME_DLL=ON
+
+          # Compila as bibliotecas necessárias
+          cmake --build build-android --parallel 4
+
+      - name: Upload compiled files
+        uses: actions/upload-artifact@v4
+        with:
+          name: libgtav_fast_patched
+          path: |
+            build-android/**/*.so
+            build-android/**/*.apk
