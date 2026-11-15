@@ -1,0 +1,41 @@
+name: Build Android Exynos Fix
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup Android NDK
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r26d
+
+      - name: Install Ninja and CMake
+        run: sudo apt-get update && sudo apt-get install -y ninja-build cmake
+
+      - name: Apply warmup-limit.patch and limit PipelineCompiler to 1 thread
+        run: |
+          if [ -f warmup-limit.patch ]; then
+            git apply warmup-limit.patch
+          fi
+          # Também reduz as 3 threads fixas do PipelineCompiler para 1 thread no Android:
+          find . -name "*.cpp" -o -name "*.h" | xargs sed -i 's/kCompilerThreads = 3/kCompilerThreads = 1/g' || true
+
+      - name: Build libgtav_fast.so
+        run: |
+          chmod +x tools/android/make_shell.sh
+          ./tools/android/make_shell.sh
+
+      - name: Upload compiled libgtav_fast.so
+        uses: actions/upload-artifact@v4
+        with:
+          name: libgtav_fast_patched
+          path: |
+            **/libgtav_fast.so
+            **/*.apk
