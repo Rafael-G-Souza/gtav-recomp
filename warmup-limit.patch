@@ -1,0 +1,62 @@
+diff --git a/gtav/src/native/backend.cpp b/gtav/src/native/backend.cpp
+index 5e70dfe..b8e11da 100644
+--- a/gtav/src/native/backend.cpp
++++ b/gtav/src/native/backend.cpp
+@@ -128,6 +128,24 @@ REXCVAR_DEFINE_INT32(gtav_native_dump_rt_count, 150, "GTAV",
+ REXCVAR_DEFINE_DOUBLE(gtav_native_pipeline_wait_ms, GTAV_PIPELINE_WAIT_DEFAULT, "GTAV",
+                       "Background pipeline compiles: a frame waits up to this long in total for its draws' "
+                       "pipelines before skipping them (0: never wait)");
++// Pipeline warm-up (PipelineWarmer) on phones: 4 warm-up workers on top of the 3 PipelineCompiler
++// workers meant 7 driver compiles at once. On a Galaxy S24+ (Exynos 2400 / Xclipse 940, Samsung
++// Vulkan driver) the process aborted ~1.5-2 min after start with "Scudo ERROR: internal map failure
++// (Out of memory)" inside vulkan.samsung.so, called from the PipelineWarmer thread, once the list
++// held 275-353 pipelines. Fewer workers and a bounded list keep the driver's memory in check.
++#ifdef __ANDROID__
++#define GTAV_WARMUP_THREADS_DEFAULT 1
++#define GTAV_WARMUP_MAX_DEFAULT 128
++#else
++#define GTAV_WARMUP_THREADS_DEFAULT 4
++#define GTAV_WARMUP_MAX_DEFAULT 0
++#endif
++REXCVAR_DEFINE_INT32(gtav_native_warmup_threads, GTAV_WARMUP_THREADS_DEFAULT, "GTAV",
++                     "Worker threads that compile the pipelines of earlier runs while the game boots "
++                     "(0: no warm-up, the pipelines are compiled when a draw needs them)");
++REXCVAR_DEFINE_INT32(gtav_native_warmup_max, GTAV_WARMUP_MAX_DEFAULT, "GTAV",
++                     "Pipeline warm-up: compile at most this many of the newest recorded pipelines "
++                     "(0: all of them). The rest stay in pipelines.bin and compile on demand");
+ // Live experiments for the clear-sky slabs (settable while running through logs/menu_set).
+ REXCVAR_DEFINE_BOOL(gtav_native_colorless, true, "GTAV",
+                     "Depth-only draws keep the bound pass's colour attachments with writes off (fewer passes)");
+@@ -1135,13 +1153,29 @@ class PipelineWarmer {
+     }
+     file_ = std::fopen(file.string().c_str(), valid == data.size() ? "ab" : "wb");
+     if (file_ && valid != data.size() && valid) std::fwrite(data.data(), 1, valid, file_);
++    // Bound the warm-up. known_ keeps every key of the file, so a pipeline left out here is not
++    // recorded twice: it is simply compiled on demand when a draw needs it.
++    const int warm_threads = std::max(0, REXCVAR_GET(gtav_native_warmup_threads));
++    const size_t warm_max = size_t(std::max(0, REXCVAR_GET(gtav_native_warmup_max)));
++    if (warm_threads == 0) {
++      queue_.clear();
++      records_.clear();
++    } else if (warm_max && queue_.size() > warm_max) {
++      size_t dropped = queue_.size() - warm_max;  // the oldest records come first in the file
++      while (queue_.size() > warm_max) {
++        records_.erase(queue_.front()->key);
++        queue_.pop_front();
++      }
++      REXLOG_INFO("[native] pipeline warm-up: {} older pipelines left to compile on demand", dropped);
++    }
+     total_ = uint32_t(queue_.size());
+     if (queue_.empty()) return;
+     remaining_ = total_;
+     start_ = std::chrono::steady_clock::now();
+-    REXLOG_INFO("[native] pipeline warm-up: compiling {} pipelines from earlier runs", total_);
+-    workers_ = 4;
+-    for (int i = 0; i < 4; i++) std::thread([this] { Worker(); }).detach();
++    REXLOG_INFO("[native] pipeline warm-up: compiling {} pipelines from earlier runs on {} threads", total_,
++                warm_threads);
++    workers_ = warm_threads;
++    for (int i = 0; i < warm_threads; i++) std::thread([this] { Worker(); }).detach();
+   }
+ 
+   // Appends a pipeline first created this run.
