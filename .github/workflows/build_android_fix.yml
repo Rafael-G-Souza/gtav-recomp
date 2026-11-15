@@ -16,38 +16,31 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y ninja-build cmake pkg-config python3 clang lld llvm
 
-      - name: Apply warmup-limit.patch and limit threads
+      - name: Apply patch and fix make_shell.sh
         run: |
           if [ -f warmup-limit.patch ]; then
             echo "Aplicando warmup-limit.patch..."
-            git apply --ignore-whitespace --verbose warmup-limit.patch || patch -p1 --ignore-whitespace < warmup-limit.patch
+            git apply --ignore-whitespace --verbose warmup-limit.patch || true
           fi
-          # Limita também as 3 threads fixas do PipelineCompiler para 1 thread no Android:
+          
+          # Limita as threads do PipelineCompiler para 1 no Android para evitar OOM:
           find . -type f \( -name "*.cpp" -o -name "*.h" \) -exec sed -i 's/kCompilerThreads = 3/kCompilerThreads = 1/g' {} + || true
+          
+          # Remove a chamada ao env.sh local que quebra o runner do GitHub
+          sed -i 's|source ~/android-tools/env.sh|# source ~/android-tools/env.sh|g' tools/android/make_shell.sh
 
-      - name: Build libgtav_fast.so
+      - name: Build libgtav_fast.so via make_shell.sh
         run: |
           export ANDROID_NDK_HOME="${ANDROID_NDK_LATEST_HOME:-$ANDROID_NDK_HOME}"
           export ANDROID_NDK_ROOT="$ANDROID_NDK_HOME"
-          export NDK="$ANDROID_NDK_HOME"
-          echo "=== Conteudo do make_shell.sh ==="
-          head -n 35 tools/android/make_shell.sh
-          echo "================================="
-          chmod +x tools/android/*.sh || true
-          # Passa o NDK ou diretorio de build como $1 e $2 para satisfazer a linha 17:
-          bash -x tools/android/make_shell.sh "$ANDROID_NDK_HOME" "$PWD/build-android" || \
-          bash -x tools/android/make_shell.sh "$PWD/build-android" "$ANDROID_NDK_HOME" || \
-          (
-            echo "Fallback: Compilando gtav_fast diretamente via CMake + Ninja..."
-            cmake -B build-android -G Ninja \
-              -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake" \
-              -DANDROID_ABI=arm64-v8a \
-              -DANDROID_PLATFORM=android-30 \
-              -DCMAKE_BUILD_TYPE=Release
-            cmake --build build-android --target gtav_fast --parallel 4 || cmake --build build-android --parallel 4
-          )
+          export NDK_ROOT="$ANDROID_NDK_HOME"
+          echo "Usando NDK em: $ANDROID_NDK_HOME"
+          
+          chmod +x tools/android/*.sh
+          # Passa o diretório de saída como o argumento exigido ($1)
+          ./tools/android/make_shell.sh build-android
 
-      - name: Upload compiled libgtav_fast.so
+      - name: Upload compiled files
         uses: actions/upload-artifact@v4
         with:
           name: libgtav_fast_patched
